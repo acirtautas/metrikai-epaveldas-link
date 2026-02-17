@@ -1,77 +1,37 @@
 // ==UserScript==
-// @name         Metrikai.lt + ePaveldas.lt link
+// @name         metrikai.lt + epaveldas.lt link
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Fixes broken epaveldas.lt links and auto-navigates to the correct page
+// @version      1.1
+// @description  Fixes broken epaveldas.lt links with correct page navigation
 // @author       Alfonsas Cirtautas
 // @updateURL    https://raw.githubusercontent.com/acirtautas/metrikai-epaveldas-link/main/metrikai-epaveldas-link.user.js
 // @downloadURL  https://raw.githubusercontent.com/acirtautas/metrikai-epaveldas-link/main/metrikai-epaveldas-link.user.js
 // @match        https://metrikai.lt/*
-// @match        https://www.epaveldas.lt/*
 // @grant        none
 // ==/UserScript==
 (function () {
     'use strict';
 
-    // =========================================================
-    //  EPAVELDAS SIDE — read ?page= from URL, fill the input
-    // =========================================================
-    if (location.hostname.includes('epaveldas.lt')) {
-        const params = new URLSearchParams(location.search);
-        const page = params.get('page');
-        if (!page) return;
-
-        // The viewer is an Angular app, so the input may not exist yet — poll for it
-        const MAX_WAIT_MS = 10000;
-        const POLL_INTERVAL_MS = 300;
-        let elapsed = 0;
-
-        const poller = setInterval(() => {
-            elapsed += POLL_INTERVAL_MS;
-
-            const input = document.querySelector('#page-number-input');
-            if (input) {
-                clearInterval(poller);
-
-                // Angular listens to native input + change events, not just .value =
-                const nativeInputSetter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                ).set;
-                nativeInputSetter.call(input, page);
-                input.dispatchEvent(new Event('input',  { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-                input.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', keyCode: 13, bubbles: true }));
-            }
-
-            if (elapsed >= MAX_WAIT_MS) clearInterval(poller);
-        }, POLL_INTERVAL_MS);
-
-        return; // nothing else to do on epaveldas side
-    }
-
-    // =========================================================
-    //  METRIKAI SIDE — fix broken links, append &page=
-    // =========================================================
-    const LAPO_PATTERN = /Lapo Nr\.\s*(\S+)/i;
-
-    function resolveNewLink(link, tableText) {
+    function resolveNewLink(link) {
         const url = new URL(link.href);
 
         // --- Type 1: vbspi/biRecord.do?...&biExemplarId=...&psl=... ---
         if (url.pathname.includes('/vbspi/biRecord.do')) {
+            // Need to find LVIA reference in the page context
+            const sourceTable = link.closest('table');
+            if (!sourceTable) return null;
+            
+            const tableText = sourceTable.innerText;
             const lviaMatch = tableText.match(/LVIA\/([^\s]+)/);
             if (!lviaMatch) return null;
 
             const lviaPath = lviaMatch[1];
             const encodedPath = lviaPath.split('/').map(encodeURIComponent).join('%2F');
 
-            const lapoMatch = tableText.match(LAPO_PATTERN);
-            const pageHint = lapoMatch ? ` (p. ${lapoMatch[1]})` : '';
-
-            // psl= in the old URL was the viewer's internal page offset
+            // psl= is the real page number in the viewer
             const psl = url.searchParams.get('psl');
-            const pageParam = psl ? `&page=${psl}` : '';
+            const pageParam = psl ? `&wr=${psl}` : '';
+            const pageHint = psl ? ` (p. ${psl})` : '';
 
             return {
                 newHref: `https://www.epaveldas.lt/preview?id=${encodedPath}${pageParam}`,
@@ -79,15 +39,16 @@
             };
         }
 
-        // --- Type 2: /recordImageSmall/ARCH|LVIA/...?exId=...&seqNr=... ---
-        const imgMatch = url.pathname.match(/\/recordImageSmall\/(?:ARCH|LVIA)\/(.+)/);
+        // --- Type 2: /recordImageSmall/ARCH|LVIA|KVB/...?exId=...&seqNr=... ---
+        const imgMatch = url.pathname.match(/\/recordImageSmall\/(?:ARCH|LVIA|KVB)\/(.+)/);
         if (imgMatch) {
             const rawPath = imgMatch[1].replace(/\/$/, '');
             const encodedPath = rawPath.split('/').map(encodeURIComponent).join('%2F');
 
+            // seqNr= is the real page number in the viewer
             const seqNr = url.searchParams.get('seqNr');
+            const pageParam = seqNr ? `&wr=${seqNr}` : '';
             const pageHint = seqNr ? ` (p. ${seqNr})` : '';
-            const pageParam = seqNr ? `&page=${seqNr}` : '';
 
             return {
                 newHref: `https://www.epaveldas.lt/preview?id=${encodedPath}${pageParam}`,
@@ -131,10 +92,7 @@
         const isBroken = BROKEN_PATTERNS.some(p => p.test(link.href));
         if (!isBroken) return;
 
-        const sourceTable = link.closest('table');
-        const tableText = sourceTable ? sourceTable.innerText : '';
-
-        const resolved = resolveNewLink(link, tableText);
+        const resolved = resolveNewLink(link);
         if (!resolved) return;
 
         const { newHref, pageHint } = resolved;
